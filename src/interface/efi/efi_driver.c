@@ -122,6 +122,7 @@ efi_driver_supported ( EFI_DRIVER_BINDING_PROTOCOL *driver __unused,
 	return EFI_UNSUPPORTED;
 }
 
+static int efi_driver_connect ( EFI_HANDLE device );
 /**
  * Attach driver to device
  *
@@ -204,6 +205,7 @@ efi_driver_start ( EFI_DRIVER_BINDING_PROTOCOL *driver __unused,
 			DBGC ( device, "EFIDRV %s using driver \"%s\"\n",
 			       efi_handle_name ( device ),
 			       efidev->driver->name );
+			DBG_PAUSE();
 			return 0;
 		}
 		DBGC ( device, "EFIDRV %s could not start driver \"%s\": %s\n",
@@ -346,7 +348,6 @@ int efi_driver_install ( void ) {
 	EFI_BOOT_SERVICES *bs = efi_systab->BootServices;
 	EFI_STATUS efirc;
 	int rc;
-
 	/* Calculate driver version number.  We use the build
 	 * timestamp (in seconds since the Epoch) shifted right by six
 	 * bits: this gives us an approximately one-minute resolution
@@ -392,9 +393,6 @@ void efi_driver_uninstall ( void ) {
  * @ret rc		Return status code
  */
 static int efi_driver_connect ( EFI_HANDLE device ) {
-	EFI_BOOT_SERVICES *bs = efi_systab->BootServices;
-	EFI_HANDLE drivers[2] =
-		{ efi_driver_binding.DriverBindingHandle, NULL };
 	EFI_STATUS efirc;
 	int rc;
 
@@ -404,30 +402,17 @@ static int efi_driver_connect ( EFI_HANDLE device ) {
 		/* Not supported; not an error */
 		return 0;
 	}
+	DBGC ( device, "EFIDRV found supported device %s\n", efi_handle_name ( device ) );
 
-	/* Disconnect any existing drivers */
-	DBGC2 ( device, "EFIDRV %s before disconnecting:\n",
-		efi_handle_name ( device ) );
-	DBGC2_EFI_PROTOCOLS ( device, device );
-	DBGC ( device, "EFIDRV %s disconnecting existing drivers\n",
-	       efi_handle_name ( device ) );
-	if ( ( efirc = bs->DisconnectController ( device, NULL,
-						  NULL ) ) != 0 ) {
-		rc = -EEFI ( efirc );
-		DBGC ( device, "EFIDRV %s could not disconnect existing "
-		       "drivers: %s\n", efi_handle_name ( device ),
-		       strerror ( rc ) );
-		/* Ignore the error and attempt to connect our drivers */
-	}
-	DBGC2 ( device, "EFIDRV %s after disconnecting:\n",
-		efi_handle_name ( device ) );
-	DBGC2_EFI_PROTOCOLS ( device, device );
+	/* Do not Disconnect existing drivers - some UEFI BIOS hang upon disconnecting. */
 
 	/* Connect our driver */
 	DBGC ( device, "EFIDRV %s connecting new drivers\n",
 	       efi_handle_name ( device ) );
-	if ( ( efirc = bs->ConnectController ( device, drivers, NULL,
-					       FALSE ) ) != 0 ) {
+	/* Call driver start direcctly instead of using bs->ConnectController(),
+	 * because on some system it does not return. */
+	if ( ( efirc = efi_driver_start(&efi_driver_binding, device,
+							NULL ) ) != 0 ) {
 		rc = -EEFI ( efirc );
 		DBGC ( device, "EFIDRV %s could not connect new drivers: "
 		       "%s\n", efi_handle_name ( device ), strerror ( rc ) );

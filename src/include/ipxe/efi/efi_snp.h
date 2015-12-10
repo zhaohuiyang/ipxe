@@ -34,7 +34,7 @@ struct efi_snp_device {
 	/** The SNP structure itself */
 	EFI_SIMPLE_NETWORK_PROTOCOL snp;
 	/** The SNP "mode" (parameters) */
-	EFI_SIMPLE_NETWORK_MODE mode;
+	EFI_SIMPLE_NETWORK_MODE *mode;
 	/** Started flag */
 	int started;
 	/** Pending interrupt status */

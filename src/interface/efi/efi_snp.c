@@ -82,56 +82,9 @@ static EFI_GUID dummy_load_file_protocol_guid = {
  *
  * @v snp		SNP interface
  */
-static void efi_snp_set_state ( struct efi_snp_device *snpdev ) {
-	struct net_device *netdev = snpdev->netdev;
-	EFI_SIMPLE_NETWORK_MODE *mode = &snpdev->mode;
-
-	/* Calculate state */
-	if ( ! snpdev->started ) {
-		/* Start() method not called; report as Stopped */
-		mode->State = EfiSimpleNetworkStopped;
-	} else if ( ! netdev_is_open ( netdev ) ) {
-		/* Network device not opened; report as Started */
-		mode->State = EfiSimpleNetworkStarted;
-	} else if ( efi_snp_claimed ) {
-		/* Network device opened but claimed for use by iPXE; report
-		 * as Started to inhibit receive polling.
-		 */
-		mode->State = EfiSimpleNetworkStarted;
-	} else {
-		/* Network device opened and available for use via SNP; report
-		 * as Initialized.
-		 */
-		mode->State = EfiSimpleNetworkInitialized;
-	}
+static void efi_snp_set_state ( struct efi_snp_device *snpdev __unused) {
 }
 
-/**
- * Set EFI SNP mode based on iPXE net device parameters
- *
- * @v snp		SNP interface
- */
-static void efi_snp_set_mode ( struct efi_snp_device *snpdev ) {
-	struct net_device *netdev = snpdev->netdev;
-	EFI_SIMPLE_NETWORK_MODE *mode = &snpdev->mode;
-	struct ll_protocol *ll_protocol = netdev->ll_protocol;
-	unsigned int ll_addr_len = ll_protocol->ll_addr_len;
-
-	mode->HwAddressSize = ll_addr_len;
-	mode->MediaHeaderSize = ll_protocol->ll_header_len;
-	mode->MaxPacketSize = netdev->max_pkt_len;
-	mode->ReceiveFilterMask = ( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
-				    EFI_SIMPLE_NETWORK_RECEIVE_MULTICAST |
-				    EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST );
-	assert ( ll_addr_len <= sizeof ( mode->CurrentAddress ) );
-	memcpy ( &mode->CurrentAddress, netdev->ll_addr, ll_addr_len );
-	memcpy ( &mode->BroadcastAddress, netdev->ll_broadcast, ll_addr_len );
-	ll_protocol->init_addr ( netdev->hw_addr, &mode->PermanentAddress );
-	mode->IfType = ntohs ( ll_protocol->ll_proto );
-	mode->MacAddressChangeable = TRUE;
-	mode->MediaPresentSupported = TRUE;
-	mode->MediaPresent = ( netdev_link_ok ( netdev ) ? TRUE : FALSE );
-}
 
 /**
  * Flush transmit ring and receive queue
@@ -370,7 +323,7 @@ efi_snp_station_address ( EFI_SIMPLE_NETWORK_PROTOCOL *snp, BOOLEAN reset,
 
 	/* Set the MAC address */
 	if ( reset )
-		new = &snpdev->mode.PermanentAddress;
+		new = &snpdev->mode->PermanentAddress;
 	memcpy ( snpdev->netdev->ll_addr, new, ll_protocol->ll_addr_len );
 
 	/* MAC address changes take effect only on netdev_open() */
@@ -619,7 +572,7 @@ efi_snp_transmit ( EFI_SIMPLE_NETWORK_PROTOCOL *snp,
 			goto err_sanity;
 		}
 		if ( ! ll_src )
-			ll_src = &snpdev->mode.CurrentAddress;
+			ll_src = &snpdev->mode->CurrentAddress;
 	}
 
 	/* Allocate buffer */
@@ -903,7 +856,7 @@ static PXE_STATCODE efi_undi_statcode ( EFI_STATUS efirc ) {
  */
 static EFI_STATUS efi_undi_get_state ( struct efi_snp_device *snpdev,
 				       PXE_CDB *cdb ) {
-	EFI_SIMPLE_NETWORK_MODE *mode = &snpdev->mode;
+	EFI_SIMPLE_NETWORK_MODE *mode = snpdev->mode;
 
 	DBGC ( snpdev, "UNDI %p GET STATE\n", snpdev );
 
@@ -1532,7 +1485,28 @@ static struct efi_snp_device * efi_snp_demux ( struct net_device *netdev ) {
 	}
 	return NULL;
 }
+/* This is copied from snpnet.c, used for casting netdev->priv */
+/** An SNP NIC */
+struct snp_nic {
+	/** EFI device */
+	struct efi_device *efidev;
+	/** Simple network protocol */
+	EFI_SIMPLE_NETWORK_PROTOCOL *snp;
+	/** Generic device */
+	struct device dev;
 
+	/** Maximum packet size
+	 *
+	 * This is calculated as the sum of MediaHeaderSize and
+	 * MaxPacketSize, and may therefore be an overestimate.
+	 */
+	size_t mtu;
+
+	/** Current transmit buffer */
+	struct io_buffer *txbuf;
+	/** Current receive buffer */
+	struct io_buffer *rxbuf;
+};
 /**
  * Create SNP device
  *
@@ -1547,7 +1521,6 @@ static int efi_snp_probe ( struct net_device *netdev ) {
 	MAC_ADDR_DEVICE_PATH *macpath;
 	size_t path_prefix_len = 0;
 	unsigned int ifcnt;
-	void *interface;
 	EFI_STATUS efirc;
 	int rc;
 
@@ -1579,8 +1552,12 @@ static int efi_snp_probe ( struct net_device *netdev ) {
 	}
 
 	/* Populate the SNP structure */
-	memcpy ( &snpdev->snp, &efi_snp_device_snp, sizeof ( snpdev->snp ) );
-	snpdev->snp.Mode = &snpdev->mode;
+	memcpy ( &snpdev->snp, ((struct snp_nic *)(netdev->priv))->snp, sizeof ( snpdev->snp ) );
+	/* re-use existing SNP mode */
+	snpdev->mode = snpdev->snp.Mode;
+	/* eliminate unused variable error */
+	efi_snp_device_snp.Mode = efi_snp_device_snp.Mode;
+
 	if ( ( efirc = bs->CreateEvent ( EVT_NOTIFY_WAIT, TPL_NOTIFY,
 					 efi_snp_wait_for_packet, snpdev,
 					 &snpdev->snp.WaitForPacket ) ) != 0 ){
@@ -1589,10 +1566,6 @@ static int efi_snp_probe ( struct net_device *netdev ) {
 		       snpdev, strerror ( rc ) );
 		goto err_create_event;
 	}
-
-	/* Populate the SNP mode structure */
-	snpdev->mode.State = EfiSimpleNetworkStopped;
-	efi_snp_set_mode ( snpdev );
 
 	/* Populate the NII structure */
 	memcpy ( &snpdev->nii, &efi_snp_device_nii, sizeof ( snpdev->nii ) );
@@ -1656,60 +1629,7 @@ static int efi_snp_probe ( struct net_device *netdev ) {
 	path_end->SubType = END_ENTIRE_DEVICE_PATH_SUBTYPE;
 	path_end->Length[0] = sizeof ( *path_end );
 
-	/* Install the SNP */
-	if ( ( efirc = bs->InstallMultipleProtocolInterfaces (
-			&snpdev->handle,
-			&efi_simple_network_protocol_guid, &snpdev->snp,
-			&efi_device_path_protocol_guid, snpdev->path,
-			&efi_nii_protocol_guid, &snpdev->nii,
-			&efi_nii31_protocol_guid, &snpdev->nii,
-			&efi_component_name2_protocol_guid, &snpdev->name2,
-			&efi_load_file_protocol_guid, &snpdev->load_file,
-			NULL ) ) != 0 ) {
-		rc = -EEFI ( efirc );
-		DBGC ( snpdev, "SNPDEV %p could not install protocols: %s\n",
-		       snpdev, strerror ( rc ) );
-		goto err_install_protocol_interface;
-	}
-
-	/* SnpDxe will repeatedly start up and shut down our NII/UNDI
-	 * interface (in order to obtain the MAC address) before
-	 * discovering that it cannot install another SNP on the same
-	 * handle.  This causes the underlying network device to be
-	 * unexpectedly closed.
-	 *
-	 * Prevent this by opening our own NII (and NII31) protocol
-	 * instances to prevent SnpDxe from attempting to bind to
-	 * them.
-	 */
-	if ( ( efirc = bs->OpenProtocol ( snpdev->handle,
-					  &efi_nii_protocol_guid, &interface,
-					  efi_image_handle, snpdev->handle,
-					  ( EFI_OPEN_PROTOCOL_BY_DRIVER |
-					    EFI_OPEN_PROTOCOL_EXCLUSIVE )))!=0){
-		rc = -EEFI ( efirc );
-		DBGC ( snpdev, "SNPDEV %p could not open NII protocol: %s\n",
-		       snpdev, strerror ( rc ) );
-		goto err_open_nii;
-	}
-	if ( ( efirc = bs->OpenProtocol ( snpdev->handle,
-					  &efi_nii31_protocol_guid, &interface,
-					  efi_image_handle, snpdev->handle,
-					  ( EFI_OPEN_PROTOCOL_BY_DRIVER |
-					    EFI_OPEN_PROTOCOL_EXCLUSIVE )))!=0){
-		rc = -EEFI ( efirc );
-		DBGC ( snpdev, "SNPDEV %p could not open NII31 protocol: %s\n",
-		       snpdev, strerror ( rc ) );
-		goto err_open_nii31;
-	}
-
-	/* Add as child of EFI parent device */
-	if ( ( rc = efi_child_add ( efidev->device, snpdev->handle ) ) != 0 ) {
-		DBGC ( snpdev, "SNPDEV %p could not become child of %s: %s\n",
-		       snpdev, efi_handle_name ( efidev->device ),
-		       strerror ( rc ) );
-		goto err_efi_child_add;
-	}
+	/* Note: do not install ipxe's own SNP protocols, re-use existing ones. */
 
 	/* Install HII */
 	if ( ( rc = efi_snp_hii_install ( snpdev ) ) != 0 ) {
@@ -1736,23 +1656,6 @@ static int efi_snp_probe ( struct net_device *netdev ) {
 	if ( snpdev->package_list )
 		efi_snp_hii_uninstall ( snpdev );
 	efi_child_del ( efidev->device, snpdev->handle );
- err_efi_child_add:
-	bs->CloseProtocol ( snpdev->handle, &efi_nii_protocol_guid,
-			    efi_image_handle, snpdev->handle );
- err_open_nii:
-	bs->CloseProtocol ( snpdev->handle, &efi_nii31_protocol_guid,
-			    efi_image_handle, snpdev->handle );
- err_open_nii31:
-	bs->UninstallMultipleProtocolInterfaces (
-			snpdev->handle,
-			&efi_simple_network_protocol_guid, &snpdev->snp,
-			&efi_device_path_protocol_guid, snpdev->path,
-			&efi_nii_protocol_guid, &snpdev->nii,
-			&efi_nii31_protocol_guid, &snpdev->nii,
-			&efi_component_name2_protocol_guid, &snpdev->name2,
-			&efi_load_file_protocol_guid, &snpdev->load_file,
-			NULL );
- err_install_protocol_interface:
 	free ( snpdev->path );
  err_alloc_device_path:
 	bs->CloseEvent ( snpdev->snp.WaitForPacket );
@@ -1779,12 +1682,6 @@ static void efi_snp_notify ( struct net_device *netdev ) {
 		DBG ( "SNP skipping non-SNP device %s\n", netdev->name );
 		return;
 	}
-
-	/* Update link state */
-	snpdev->mode.MediaPresent =
-		( netdev_link_ok ( netdev ) ? TRUE : FALSE );
-	DBGC ( snpdev, "SNPDEV %p link is %s\n", snpdev,
-	       ( snpdev->mode.MediaPresent ? "up" : "down" ) );
 
 	/* Update mode state */
 	efi_snp_set_state ( snpdev );

@@ -333,31 +333,34 @@ static int snpnet_open ( struct net_device *netdev ) {
 	EFI_STATUS efirc;
 	int rc;
 
-	/* Try setting MAC address (before initialising) */
-	if ( ( efirc = snp->snp->StationAddress ( snp->snp, FALSE, mac ) ) !=0){
-		rc = -EEFI ( efirc );
-		DBGC ( snp, "SNP %s could not set station address before "
-		       "initialising: %s\n", netdev->name, strerror ( rc ) );
-		/* Ignore error */
-	}
+	/* Do not re-initialize an already initialized SNP device as some UEFI BIOS does not allow.
+ 	* In such case we utilize the already initialized NIC with existing MAC address. */
+	if ( snp->snp->Mode->State == EfiSimpleNetworkStarted ) {
+		/* Try setting MAC address (before initialising) */
+		if ( ( efirc = snp->snp->StationAddress ( snp->snp, FALSE, mac ) ) !=0){
+			rc = -EEFI ( efirc );
+			DBGC ( snp, "SNP %s could not set station address before "
+				   "initialising: %s\n", netdev->name, strerror ( rc ) );
+			/* Ignore error */
+		}
 
-	/* Initialise NIC */
-	if ( ( efirc = snp->snp->Initialize ( snp->snp, 0, 0 ) ) != 0 ) {
-		rc = -EEFI ( efirc );
-		snpnet_dump_mode ( netdev );
-		DBGC ( snp, "SNP %s could not initialise: %s\n",
-		       netdev->name, strerror ( rc ) );
-		return rc;
-	}
+		/* Initialise NIC */
+		if ( ( efirc = snp->snp->Initialize ( snp->snp, 0, 0 ) ) != 0 ) {
+			rc = -EEFI ( efirc );
+			snpnet_dump_mode ( netdev );
+			DBGC ( snp, "SNP %s could not initialise: %s\n",
+				   netdev->name, strerror ( rc ) );
+			return rc;
+		}
 
-	/* Try setting MAC address (after initialising) */
-	if ( ( efirc = snp->snp->StationAddress ( snp->snp, FALSE, mac ) ) !=0){
-		rc = -EEFI ( efirc );
-		DBGC ( snp, "SNP %s could not set station address after "
-		       "initialising: %s\n", netdev->name, strerror ( rc ) );
-		/* Ignore error */
+		/* Try setting MAC address (after initialising) */
+		if ( ( efirc = snp->snp->StationAddress ( snp->snp, FALSE, mac ) ) !=0){
+			rc = -EEFI ( efirc );
+			DBGC ( snp, "SNP %s could not set station address after "
+				   "initialising: %s\n", netdev->name, strerror ( rc ) );
+			/* Ignore error */
+		}
 	}
-
 	/* Set receive filters */
 	if ( ( rc = snpnet_rx_filters ( netdev ) ) != 0 ) {
 		/* Ignore error */
@@ -424,12 +427,11 @@ int snpnet_start ( struct efi_device *efidev ) {
 	EFI_STATUS efirc;
 	int rc;
 
-	/* Open SNP protocol */
+	/* Open SNP protocol in non-exclusive mode, in case it is already opened by others (e.g. onboard PXE that loaded iPXE) */
 	if ( ( efirc = bs->OpenProtocol ( device,
 					  &efi_simple_network_protocol_guid,
 					  &interface, efi_image_handle, device,
-					  ( EFI_OPEN_PROTOCOL_BY_DRIVER |
-					    EFI_OPEN_PROTOCOL_EXCLUSIVE )))!=0){
+					  EFI_OPEN_PROTOCOL_GET_PROTOCOL ))!=0){
 		rc = -EEFI ( efirc );
 		DBGC ( device, "SNP %s cannot open SNP protocol: %s\n",
 		       efi_handle_name ( device ), strerror ( rc ) );
@@ -467,13 +469,9 @@ int snpnet_start ( struct efi_device *efidev ) {
 		       efi_handle_name ( device ), strerror ( rc ) );
 		goto err_start;
 	}
-	if ( ( mode->State == EfiSimpleNetworkInitialized ) &&
-	     ( ( efirc = snp->snp->Shutdown ( snp->snp ) ) != 0 ) ) {
-		rc = -EEFI ( efirc );
-		DBGC ( device, "SNP %s could not shut down: %s\n",
-		       efi_handle_name ( device ), strerror ( rc ) );
-		goto err_shutdown;
-	}
+	/* The snp device can be in the Initialized state, in such case we keep its state instead of Shutdown() to
+	 * bring it back to the Stated state as some UEFI BIOS does not allowed this. 
+	 * snpnet_open() is aware of this and avoids re-initialization accordingly. */
 
 	/* Populate network device parameters */
 	if ( mode->HwAddressSize != netdev->ll_protocol->hw_addr_len ) {
@@ -514,7 +512,6 @@ int snpnet_start ( struct efi_device *efidev ) {
  err_register_netdev:
  err_ll_addr_len:
  err_hw_addr_len:
- err_shutdown:
  err_start:
 	list_del ( &snp->dev.siblings );
 	netdev_nullify ( netdev );

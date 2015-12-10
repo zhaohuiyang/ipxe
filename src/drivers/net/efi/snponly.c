@@ -53,6 +53,8 @@ struct chained_protocol {
 	 * a duplicate protocol installed on the child handle.
 	 */
 	void *interface;
+	/** the loaded image's device handle */
+	EFI_HANDLE device;
 };
 
 /** Chainloaded SNP protocol */
@@ -60,10 +62,10 @@ static struct chained_protocol chained_snp = {
 	.protocol = &efi_simple_network_protocol_guid,
 };
 
-/** Chainloaded NII protocol */
-static struct chained_protocol chained_nii = {
-	.protocol = &efi_nii31_protocol_guid,
-};
+/** Chainloaded NII protocol is disabled as it interferes with Chainloaded SNP. */
+//static struct chained_protocol chained_nii = {
+//	.protocol = &efi_nii31_protocol_guid,
+//};
 
 /**
  * Locate chainloaded protocol instance
@@ -103,6 +105,7 @@ static int chained_locate ( struct chained_protocol *chained ) {
 		       efi_handle_name ( parent ), strerror ( rc ) );
 		goto err_open_protocol;
 	}
+	chained->device = device;
 
  err_locate_device:
 	bs->CloseProtocol ( parent, chained->protocol, efi_image_handle,
@@ -124,6 +127,19 @@ static int chained_supported ( EFI_HANDLE device,
 	EFI_STATUS efirc;
 	void *interface;
 	int rc;
+
+	/* test protocol before get protocol, to avoid rebooting */
+	if ( ( efirc = bs->OpenProtocol ( device, chained->protocol, &interface,
+					  efi_image_handle, device,
+					  EFI_OPEN_PROTOCOL_TEST_PROTOCOL ))!=0){
+		rc = -EEFI ( efirc );
+		DBGCP ( device, "CHAINED %p %s is not a %s device\n",
+			device, efi_handle_name ( device ),
+			efi_guid_ntoa ( chained->protocol ) );
+		goto err_test_protocol;
+	}
+	bs->CloseProtocol ( device, chained->protocol, efi_image_handle,
+			    device );
 
 	/* Get protocol */
 	if ( ( efirc = bs->OpenProtocol ( device, chained->protocol, &interface,
@@ -155,6 +171,7 @@ static int chained_supported ( EFI_HANDLE device,
 	bs->CloseProtocol ( device, chained->protocol, efi_image_handle,
 			    device );
  err_open_protocol:
+ err_test_protocol:
 	return rc;
 }
 
@@ -169,16 +186,17 @@ static int snponly_supported ( EFI_HANDLE device ) {
 	return chained_supported ( device, &chained_snp );
 }
 
-/**
- * Check to see if driver supports a device
- *
- * @v device		EFI device handle
- * @ret rc		Return status code
- */
-static int niionly_supported ( EFI_HANDLE device ) {
-
-	return chained_supported ( device, &chained_nii );
-}
+/* Chainloaded Nii is disabled as it interferes with Chainloaded SNP. */
+///**
+// * Check to see if driver supports a device
+// *
+// * @v device		EFI device handle
+// * @ret rc		Return status code
+// */
+//static int niionly_supported ( EFI_HANDLE device ) {
+//
+//	return chained_supported ( device, &chained_nii );
+//}
 
 /** EFI SNP chainloading-device-only driver */
 struct efi_driver snponly_driver __efi_driver ( EFI_DRIVER_NORMAL ) = {
@@ -188,13 +206,13 @@ struct efi_driver snponly_driver __efi_driver ( EFI_DRIVER_NORMAL ) = {
 	.stop = snpnet_stop,
 };
 
-/** EFI NII chainloading-device-only driver */
-struct efi_driver niionly_driver __efi_driver ( EFI_DRIVER_NORMAL ) = {
-	.name = "NIIONLY",
-	.supported = niionly_supported,
-	.start = nii_start,
-	.stop = nii_stop,
-};
+/** EFI NII chainloading-device-only driver is disabled as it interferes with Chainloaded SNP. */
+//struct efi_driver niionly_driver __efi_driver ( EFI_DRIVER_NORMAL ) = {
+//	.name = "NIIONLY",
+//	.supported = niionly_supported,
+//	.start = nii_start,
+//	.stop = nii_stop,
+//};
 
 /**
  * Initialise EFI chainloaded-device-only driver
@@ -203,7 +221,7 @@ struct efi_driver niionly_driver __efi_driver ( EFI_DRIVER_NORMAL ) = {
 static void chained_init ( void ) {
 
 	chained_locate ( &chained_snp );
-	chained_locate ( &chained_nii );
+//	chained_locate ( &chained_nii );
 }
 
 /** EFI chainloaded-device-only initialisation function */
